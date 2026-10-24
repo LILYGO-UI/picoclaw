@@ -1,9 +1,11 @@
 # PicoClaw for LILYGO UI
 
+**English** | [简体中文](README.zh-CN.md)
+
 PicoClaw is a standalone, responsive LILYGO UI application for chatting with a
 local [PicoClaw](https://github.com/sipeed/picoclaw) runtime. It provides model
 provider and chat channel configuration, runtime installation, gateway controls, activity logs,
-and a touch-friendly chat interface in one AppKit application.
+and a touch-friendly chat interface in one AppKit application. The project is built with C++17, [LILYGO UI AppKit](https://github.com/LILYGO-UI/cm0-appkit), and LVGL 9.5. It provides a CM0 ARM64 Linux package and an SDL2 desktop simulator for development and testing.
 
 The product identity is:
 
@@ -11,6 +13,25 @@ The product identity is:
 Package and executable: lilygo-ui-picoclaw
 Application ID:         cc.lilygo.ui.PicoClaw
 ```
+
+## Preview
+
+<p>
+  <img src="assets/previews/preview1.png" alt="PicoClaw chat screen" width="240">
+  <img src="assets/previews/navigation-ios.png" alt="Responsive navigation" width="240">
+  <img src="assets/previews/settings-ios.png" alt="Settings and Gateway controls" width="240">
+</p>
+<p>
+  <img src="assets/previews/models.png" alt="Model configuration list" width="240">
+  <img src="assets/previews/model-editor.png" alt="Model editor" width="240">
+  <img src="assets/previews/chat-models.png" alt="Chat model selector" width="240">
+</p>
+<p>
+  <img src="assets/previews/channels.png" alt="Chat channels" width="240">
+  <img src="assets/previews/channel-editor.png" alt="Channel editor" width="240">
+  <img src="assets/previews/weixin-binding.png" alt="Weixin QR binding" width="240">
+  <img src="assets/previews/updates.png" alt="Gateway updates" width="240">
+</p>
 
 ## Features
 
@@ -86,7 +107,100 @@ Application ID:         cc.lilygo.ui.PicoClaw
   simulator uses the official PicoClaw Docker image by default, so no native
   PicoClaw binary is installed on the Mac.
 
-## Build and test
+## Development Environment
+
+Project identity, version, package metadata, and build presets come from
+the lpm.toml and CMakePresets.json files. Run all commands from the repository root.
+
+### Get the Source
+
+```sh
+git clone --recurse-submodules https://github.com/LILYGO-UI/picoclaw.git
+cd lilygo-ui-picoclaw
+```
+
+For an existing checkout, initialize the pinned AppKit dependency:
+
+```sh
+git submodule update --init --recursive
+```
+
+AppKit is consumed directly from third_party/cm0-appkit; a separate AppKit installation is not required for the simulator. Its bundled LVGL 9.5 archive is used by default, and the presets disable LVGL network fetching.
+
+### Host Dependencies
+
+Use CMake 3.21 or later (including CTest and CPack), Python 3.11 or later, a C/C++ compiler with C++17 support, pkg-config, patch, SDL2, FreeType, LPM, curl, and CA certificates. The runtime helper and release tools also use Python and standard Unix tools such as tar and util-linux.
+
+#### Debian 12 / Ubuntu 24.04 or Later
+
+```sh
+sudo apt update
+sudo apt install build-essential cmake git pkg-config patch libsdl2-dev libfreetype6-dev curl ca-certificates python3 python3-venv python3-pip
+```
+
+#### macOS
+
+Install the Xcode Command Line Tools if needed and install host dependencies with Homebrew:
+
+```sh
+xcode-select --install
+brew install git cmake pkg-config patch sdl2 freetype curl python
+```
+
+The desktop simulator uses Docker for the default PicoClaw runtime on macOS, so install Docker Desktop before using the runtime controls.
+
+### LPM
+
+CMake invokes lpm metadata --format cmake during configuration. Install LPM in a project-local Python environment:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install "git+https://github.com/LILYGO-UI/lpm.git"
+lpm --version
+```
+
+Reactivate the environment with . .venv/bin/activate in each new terminal. CMake searches .venv/bin as well as PATH. An existing LPM installation can also be selected with -DLPM_EXECUTABLE=/absolute/path/to/lpm.
+
+Check the host environment before building:
+
+```sh
+cmake --version
+python --version
+pkg-config --modversion sdl2 freetype2
+lpm metadata --format cmake
+```
+
+### Device Cross Compiler
+
+Skip this step when only building the desktop simulator. Device builds need an AArch64 Linux cross compiler and the CM0 BSP sysroot on the development machine.
+
+**Debian / Ubuntu:**
+
+```sh
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+```
+
+**Apple Silicon macOS:**
+
+```sh
+brew install aarch64-unknown-linux-gnu
+```
+
+The toolchain expects these executable names on PATH:
+
+```sh
+aarch64-linux-gnu-gcc --version
+aarch64-linux-gnu-g++ --version
+```
+
+The toolchain wrapper downloads and caches the pinned CM0 BSP on the first
+cross configuration. See [CM0BspBuilder](https://github.com/LILYGO-UI/CM0BspBuilder)
+for SDK host and compiler requirements.
+
+## Build and Test
+
+### Desktop Simulator
 
 Requirements are CMake 3.21 or newer, a C++17 compiler, `pkg-config`, SDL2,
 LPM, Python 3 for tests, and the checked-in AppKit submodule.
@@ -97,23 +211,26 @@ cmake --build --preset host-simulator --parallel
 ctest --preset host-simulator
 ```
 
+### Tests
+
+| Test | Coverage |
+| --- | --- |
+| picoclaw-control | Helper status, installation, Gateway lifecycle, and configuration persistence |
+| picoclaw-provider | Provider configuration, model discovery, and usage responses |
+| picoclaw-channels | Channel loading, editing, secrets, and asynchronous saves |
+| picoclaw-weixin | Weixin QR binding and polling state transitions |
+| picoclaw-releases | Release listing, checksum validation, installation, and rollback |
+| picoclaw-core | Model and asynchronous client rules without LVGL |
+| picoclaw-protocol | Pico Protocol framing and event parsing |
+| picoclaw-websocket | POSIX WebSocket connection and frame handling |
+| picoclaw-view-model | ViewModel commands and Subject publication |
+| picoclaw-render-* | Chat, Models, Channels, and Settings rendering and interaction at all four viewports |
+
 The render tests exercise chat, models, channels, and settings navigation at `320x568`,
 `568x1232`, `1232x568`, and `1024x768`. Their PPM snapshots are written under
 `build/host-simulator/`.
 
-[Settings preview](assets/previews/settings-ios.png)
-
-[Navigation preview](assets/previews/navigation-ios.png)
-
-[Models preview](assets/previews/models.png) · [Model editor](assets/previews/model-editor.png)
-
-[Swipe to delete a model](assets/previews/model-swipe-delete.png)
-
-[Chat model selector](assets/previews/chat-models.png)
-
-[Channels preview](assets/previews/channels.png) · [Channel editor](assets/previews/channel-editor.png)
-
-[Weixin QR binding preview](assets/previews/weixin-binding.png)
+### Desktop Runtime
 
 The host simulator connects to a real PicoClaw runtime on the development
 machine. Building the UI does not install that runtime. On macOS, install
@@ -152,6 +269,8 @@ Settings binary path. Otherwise the helper prefers the runtime beside the
 installed control helper, then its legacy managed installation, then `PATH`.
 A release explicitly installed from **Updates** takes precedence over the
 bundled runtime. Custom binary paths must be cleared before installing a release.
+
+### CM0 Device Build
 
 Build and package for the device with:
 
@@ -223,7 +342,19 @@ control helper use that directory for `ui-settings.conf` and `config.json`,
 with `.security.yml` beside the JSON file. Existing configurations and keys
 remain in the user's writable directories across package upgrades.
 
-## Configure chat channels
+### Troubleshooting
+
+| Symptom | Action |
+| --- | --- |
+| lpm is required to read project metadata | Install LPM in the project virtual environment, put it on PATH, or set LPM_EXECUTABLE. |
+| LilyGoUI or bundled LVGL cannot be found | Initialize the AppKit submodule with git submodule update --init --recursive. |
+| SDL2 or FreeType is missing | Install the host development packages; for cross builds, check the CM0 sysroot. |
+| Homebrew libraries are not found | Configure with cmake --preset host-simulator -DCMAKE_PREFIX_PATH="$(brew --prefix)". |
+| Docker runtime controls fail on macOS | Start Docker Desktop and verify that docker info succeeds. |
+| Bundled runtime download fails | Check GitHub access and disk space, then rerun configuration or provide LILYGO_PICOCLAW_RUNTIME_ARCHIVE. |
+| Gateway does not start on the board | Check the selected binary, config.json, .security.yml, and the activity log under the XDG state directory. |
+
+## Configure Chat Channels
 
 Open **Channels** to view the available integrations and their configured
 enabled state: Feishu / Lark, Weixin, Discord, Telegram, Slack, DingTalk, QQ,
@@ -255,7 +386,7 @@ Changes take effect when the Gateway next starts. If it is running, use
 not test ordinary channel connectivity or send a test message; Weixin binding
 is the channel's explicit QR authorization flow.
 
-## Check and install Gateway updates
+## Check and Install Gateway Updates
 
 On the board, open **Settings → Updates → Check for updates**.
 The application reads every page of the public
@@ -296,7 +427,7 @@ update action.
 
 [Updates preview](assets/previews/updates.png)
 
-## Runtime data
+## Runtime Data
 
 The installed control helper follows the XDG base-directory specification:
 
@@ -398,7 +529,7 @@ The interaction model was adapted from the PicoClaw feature in
 `bb831ab358b66f5bd9a87ecd7c580fee4537492e`, with K230-specific paths, launcher
 preferences, and the riscv64 runtime removed.
 
-## Android FUI reference
+## Android FUI Reference
 
 The Android/Flutter reference implementation is maintained in
 [`sipeed/picoclaw_fui`](https://github.com/sipeed/picoclaw_fui). Its chat UI is in
@@ -411,3 +542,21 @@ and status are at the top of Settings, with activity logs in its **Logs** submen
 Model configuration is managed in **Models**. The CM0 backend keeps the
 existing Linux helper path; the Android WebSocket protocol and service bridge
 are documented in [docs/picoclaw-fui-port.md](docs/picoclaw-fui-port.md).
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Architecture overview](docs/00-overview.md) | Product scope, data flow, runtime directories, and implementation boundaries |
+| [UI development guidelines](docs/01-user-interface.md) | Layout, typography, colors, ownership, responsive behavior, and visual verification |
+| [PicoClaw FUI port](docs/picoclaw-fui-port.md) | Android/Flutter reference mapping, Pico Protocol, and CM0 transport notes |
+
+## Acknowledgments
+
+PicoClaw is provided by [Sipeed](https://github.com/sipeed/picoclaw). The
+interaction model follows the Android/Flutter reference in
+[sipeed/picoclaw_fui](https://github.com/sipeed/picoclaw_fui) and the earlier
+K230 implementation referenced by the project documentation. The application
+uses [LILYGO UI AppKit](https://github.com/LILYGO-UI/cm0-appkit) and
+[LVGL](https://lvgl.io/). Please follow the licenses and service policies of
+these upstream projects and the configured model providers.
