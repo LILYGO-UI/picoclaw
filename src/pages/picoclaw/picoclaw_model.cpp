@@ -147,6 +147,23 @@ bool local_endpoint(std::string_view value)
            value.find("://ollama") != std::string_view::npos;
 }
 
+bool websocket_transport()
+{
+    const char *transport = std::getenv("PICOCLAW_TRANSPORT");
+    return transport && std::string_view(transport) == "websocket";
+}
+
+std::string websocket_gateway_url(const PicoClawSettings &settings)
+{
+    // A wildcard is a bind address, never a client destination. Keep the
+    // displayed endpoint consistent with the address used by the WebSocket
+    // transport in PicoClawViewModel::send().
+    std::string host = settings.public_mode || settings.host.empty() || settings.host == "0.0.0.0"
+                           ? "127.0.0.1" : settings.host;
+    if (host.find(':') != std::string::npos && host.front() != '[') host = "[" + host + "]";
+    return "http://" + host + ":" + std::to_string(PicoClawProtocol::gateway_port);
+}
+
 std::filesystem::path settings_path()
 {
     if (const char *override_path = std::getenv("PICOCLAW_UI_SETTINGS"); override_path && *override_path)
@@ -1075,6 +1092,12 @@ void PicoClawModel::apply_runtime_status(std::string_view output)
     if (!model_key.empty()) runtime_.model_key_ready = model_key == "ready";
     if (!version.empty()) runtime_.version = version;
     if (!url.empty()) runtime_.url = url;
+    // The helper status command reports the board's bind/discovery address,
+    // which can be the placeholder "device" when the SDL simulator is using
+    // a remote WebSocket gateway. In that mode the configured UI host is the
+    // endpoint the user actually connects to, so keep the Settings page in
+    // sync with the transport.
+    if (websocket_transport()) runtime_.url = websocket_gateway_url(settings_);
     if (!web_url.empty()) runtime_.web_url = web_url;
     if (!update_supported.empty()) runtime_.update_supported = update_supported == "yes";
 

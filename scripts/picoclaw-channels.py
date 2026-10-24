@@ -356,7 +356,7 @@ def save_channel(channel_id, payload, config_path, security_path, pico_home):
     if not config:
         config = {"version": 3, "agents": {"defaults": {
             "workspace": str(pico_home / "workspace"), "restrict_to_workspace": True,
-            "max_tokens": 2048, "context_window": 32768, "temperature": 0.7, "max_tool_iterations": 6}},
+            "max_tokens": 2048, "context_window": 32768, "temperature": 0.7, "max_tool_iterations": 20}},
             "gateway": {"host": "0.0.0.0", "port": int(os.environ.get("PICOCLAW_GATEWAY_PORT", "18790")),
                         "log_level": "warn"}, "model_list": [], "channel_list": {}}
     channels = config.setdefault("channel_list", {})

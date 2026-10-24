@@ -1,6 +1,7 @@
 #ifndef LILYGO_UI_PICOCLAW_PAGES_PICOCLAW_VIEW_HPP
 #define LILYGO_UI_PICOCLAW_PAGES_PICOCLAW_VIEW_HPP
 
+#include "components/host_text_input.hpp"
 #include "pages/picoclaw/picoclaw_view_model.hpp"
 
 #include <lvgl.h>
@@ -37,6 +38,8 @@ private:
     static void model_editor_input_changed(lv_event_t *event);
     static void model_editor_dropdown_opened(lv_event_t *event);
     static void model_save_clicked(lv_event_t *event);
+    static void model_front_key(lv_event_t *event);
+    static void model_delete_key(lv_event_t *event);
     static void model_swipe_event(lv_event_t *event);
     static void model_swipe_delete_clicked(lv_event_t *event);
     static void models_scroll_started(lv_event_t *event);
@@ -88,6 +91,7 @@ private:
     void rebuild_messages();
     void fill_settings_fields();
     void update_provider_statuses();
+    void update_chat_dropdown_text();
     void send_message();
     void show_keyboard(lv_obj_t *textarea, bool chat_input);
     void hide_keyboard();
@@ -114,11 +118,8 @@ private:
     lv_obj_t *bottom_settings_button_  = nullptr;
 
     lv_obj_t *chat_shell_              = nullptr;
-    lv_obj_t *status_card_             = nullptr;
-    lv_obj_t *status_label_            = nullptr;
+    lv_obj_t *chat_feedback_           = nullptr;
     lv_obj_t *connection_badge_        = nullptr;
-    lv_obj_t *profile_label_           = nullptr;
-    lv_obj_t *runtime_summary_label_   = nullptr;
     lv_obj_t *conversation_            = nullptr;
     lv_obj_t *composer_                = nullptr;
     lv_obj_t *message_input_           = nullptr;
@@ -205,6 +206,7 @@ private:
     std::uint64_t rendered_revision_         = 0;
     std::uint64_t rendered_message_revision_ = 0;
     bool keyboard_is_chat_                   = false;
+    HostTextInput host_text_input_;
     bool compact_layout_                     = false;
     bool applying_layout_                    = false;
     bool rendered_busy_                      = false;

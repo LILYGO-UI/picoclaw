@@ -37,6 +37,10 @@ inline constexpr std::uint32_t color_scrim                = 0x000000;
 [[nodiscard]] const lv_font_t *font(std::uint32_t size) noexcept;
 [[nodiscard]] bool set_text_font(lv_obj_t *object, std::uint32_t size, lv_style_selector_t selector = 0) noexcept;
 
+// Keep a consistent focus ring inside every interactive control so rounded
+// and scrollable parents cannot clip it.
+void set_focus_outline(lv_obj_t *object) noexcept;
+
 lv_obj_t *create_page(lv_obj_t *parent);
 lv_obj_t *create_header(lv_obj_t *parent, const char *title);
 lv_obj_t *create_card(lv_obj_t *parent);

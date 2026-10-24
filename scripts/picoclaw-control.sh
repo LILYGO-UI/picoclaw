@@ -673,7 +673,7 @@ try:
             "agents": {"defaults": {
                 "workspace": workspace, "restrict_to_workspace": True,
                 "max_tokens": 2048, "context_window": 32768,
-                "temperature": 0.7, "max_tool_iterations": 6}},
+                "temperature": 0.7, "max_tool_iterations": 20}},
             "gateway": {"host": "0.0.0.0", "port": int(port), "log_level": "warn"},
             "model_list": [], "channel_list": {}}
     if not isinstance(config, dict):

@@ -1156,7 +1156,7 @@ bool PicoClawViewModel::poll_chat_model_switch(const PicoClawRuntimeResult &resu
             chat_profile_confirmed_ = true;
             chat_model_ready_ = true;
             chat_model_switch_ = ChatModelSwitch::None;
-            status_text_ = "Chat model ready: " + chat_profile_.title;
+            status_text_ = "Ready to chat";
             publish();
             return true;
         case ChatModelSwitch::None:

@@ -134,6 +134,37 @@ void assert_on_screen(lv_obj_t *object, int width, int height)
     assert(area.y1 >= 0 && area.y2 < height);
 }
 
+bool is_focus_color(const lv_color32_t &pixel)
+{
+    return pixel.blue > pixel.red + 50 && pixel.blue > pixel.green + 20;
+}
+
+void assert_focus_border_visible(lv_obj_t *object)
+{
+    lv_area_t area{};
+    lv_obj_get_coords(object, &area);
+    const int center_x  = (area.x1 + area.x2) / 2;
+    const int center_y  = (area.y1 + area.y2) / 2;
+    const auto pixel_at = [](int x, int y) -> const lv_color32_t & {
+        assert(x >= 0 && x < display_width && y >= 0 && y < static_cast<int>(framebuffer.size() / display_width));
+        return framebuffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(display_width) +
+                           static_cast<std::size_t>(x)];
+    };
+    const auto edge_has_focus_color = [&](int x1, int y1, int x2, int y2) {
+        for (int y = y1; y <= y2; ++y)
+            for (int x = x1; x <= x2; ++x)
+                if (is_focus_color(pixel_at(x, y))) return true;
+        return false;
+    };
+
+    // Check the center of each side, away from rounded corners. The focused
+    // border should be painted within the control's bounds on all four sides.
+    assert(edge_has_focus_color(center_x - 3, area.y1, center_x + 3, area.y1 + 3));
+    assert(edge_has_focus_color(center_x - 3, area.y2 - 3, center_x + 3, area.y2));
+    assert(edge_has_focus_color(area.x1, center_y - 3, area.x1 + 3, center_y + 3));
+    assert(edge_has_focus_color(area.x2 - 3, center_y - 3, area.x2, center_y + 3));
+}
+
 lv_obj_t *required_object(lv_obj_t *root, const char *name)
 {
     auto *object = lv_obj_find_by_name(root, name);
@@ -258,6 +289,44 @@ void tap_pointer(lv_indev_t *pointer, lv_obj_t *object)
     advance_ui();
 }
 
+void press_hardware_key(lv_obj_t *object, uint32_t key)
+{
+    assert(lv_obj_is_group_def(object));
+    auto *group = lv_group_create();
+    assert(group);
+    lv_group_add_obj(group, object);
+    lv_group_focus_obj(object);
+
+    struct HardwareKeyState {
+        lv_indev_state_t state;
+        uint32_t key;
+    } state{LV_INDEV_STATE_RELEASED, key};
+    auto *keyboard = lv_indev_create();
+    assert(keyboard);
+    lv_indev_set_type(keyboard, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_display(keyboard, lv_obj_get_display(object));
+    lv_indev_set_group(keyboard, group);
+    lv_indev_set_user_data(keyboard, &state);
+    lv_indev_set_read_cb(keyboard, [](lv_indev_t *input, lv_indev_data_t *data) {
+        const auto *state = static_cast<const HardwareKeyState *>(lv_indev_get_user_data(input));
+        data->key = state->key;
+        data->state = state->state;
+    });
+
+    state.state = LV_INDEV_STATE_PRESSED;
+    lv_indev_read(keyboard);
+    state.state = LV_INDEV_STATE_RELEASED;
+    lv_indev_read(keyboard);
+    lv_indev_delete(keyboard);
+    lv_group_delete(group);
+    advance_ui();
+}
+
+void press_hardware_enter(lv_obj_t *object)
+{
+    press_hardware_key(object, LV_KEY_ENTER);
+}
+
 void swipe_model_row(lv_indev_t *pointer, lv_obj_t *row, bool left, bool short_drag = false)
 {
     lv_area_t area{};
@@ -379,6 +448,39 @@ void exercise_model_swipe_delete(lv_obj_t *root, lv_display_t *display, lv_indev
     chat_model = required_object(root, "picoclaw_chat_model_dropdown");
     assert(lv_dropdown_get_option_count(chat_model) == initial_count);
     assert(std::string(lv_dropdown_get_options(chat_model)).find("Swipe deletion test") == std::string::npos);
+
+    // Hardware keyboards cannot perform a horizontal swipe. Delete/Backspace
+    // on a focused model card opens the confirmation action, then Enter
+    // activates it just like the touch Delete button.
+    click_and_advance(root, "picoclaw_models_tab");
+    const auto keyboard_initial_count = model_card_count(root);
+    click_and_advance(root, "picoclaw_provider_add_0");
+    lv_textarea_set_text(required_object(root, "picoclaw_model_editor_provider"), "Keyboard deletion test");
+    lv_textarea_set_text(required_object(root, "picoclaw_model_editor_id"), "openai/keyboard-deletion-test");
+    lv_textarea_set_text(required_object(root, "picoclaw_model_editor_key"), "sk-render-keyboard-secret-4321");
+    click_and_advance(root, "picoclaw_model_save");
+    assert(model_card_count(root) == keyboard_initial_count + 1);
+    const auto keyboard_index = keyboard_initial_count;
+    auto *keyboard_row = required_object(root, ("picoclaw_model_card_" + std::to_string(keyboard_index)).c_str());
+    lv_obj_scroll_to_view_recursive(keyboard_row, LV_ANIM_OFF);
+    lv_obj_update_layout(root);
+    press_hardware_key(required_object(root, ("picoclaw_model_front_" + std::to_string(keyboard_index)).c_str()),
+                       LV_KEY_DEL);
+    assert_model_swipe_open(root, keyboard_index, width, height);
+    auto *keyboard_delete = required_object(
+        root, ("picoclaw_model_swipe_delete_" + std::to_string(keyboard_index)).c_str());
+    assert(labels_contain(keyboard_delete, "Confirm"));
+    press_hardware_key(keyboard_delete, LV_KEY_LEFT);
+    assert_model_swipe_closed(root, keyboard_index);
+    press_hardware_key(required_object(root, ("picoclaw_model_front_" + std::to_string(keyboard_index)).c_str()),
+                       LV_KEY_DEL);
+    keyboard_delete = required_object(
+        root, ("picoclaw_model_swipe_delete_" + std::to_string(keyboard_index)).c_str());
+    assert(labels_contain(keyboard_delete, "Confirm"));
+    press_hardware_enter(keyboard_delete);
+    lv_obj_update_layout(root);
+    assert(model_card_count(root) == keyboard_initial_count);
+    assert(!labels_contain(required_object(root, "picoclaw_models_page"), "Keyboard deletion test"));
 }
 
 std::uint32_t dropdown_option_containing(lv_obj_t *dropdown, const std::string &text)
@@ -549,17 +651,69 @@ void assert_chat_model_layout(lv_obj_t *root, int width, int height)
 {
     auto *row = required_object(root, "picoclaw_chat_model_row");
     auto *dropdown = required_object(root, "picoclaw_chat_model_dropdown");
+    auto *history = required_object(root, "picoclaw_history");
+    auto *new_chat = required_object(root, "picoclaw_new_chat");
+    auto *title = required_object(root, "picoclaw_title");
+    auto *connection = required_object(root, "picoclaw_connection_badge");
     assert_on_screen(row, width, height);
     assert_on_screen(dropdown, width, height);
-    assert(lv_obj_get_height(row) >= 44 && lv_obj_get_height(dropdown) >= 44);
-    lv_area_t row_area{}, status_area{}, history_area{};
-    lv_obj_get_content_coords(row, &row_area);
-    assert_horizontal_settings_layout(dropdown, row_area);
+    assert_on_screen(history, width, height);
+    assert_on_screen(new_chat, width, height);
+    assert_on_screen(connection, width, height);
+    assert(lv_obj_get_height(row) >= 44 && lv_obj_get_height(dropdown) >= 44 && lv_obj_get_height(history) >= 44);
+    assert(lv_obj_get_width(dropdown) >= 72 && lv_obj_get_width(history) >= 72);
+    assert(lv_obj_get_parent(row) == required_object(root, "picoclaw_header"));
+    assert(lv_obj_get_parent(connection) == row && lv_obj_get_parent(new_chat) == row);
+    assert(!lv_obj_find_by_name(root, "picoclaw_status_card"));
+    assert(!lv_obj_find_by_name(root, "picoclaw_status"));
+    assert(lv_obj_has_flag(required_object(root, "picoclaw_chat_feedback"), LV_OBJ_FLAG_HIDDEN));
+    lv_area_t header_area{}, title_area{}, row_area{}, model_area{}, history_area{}, connection_area{}, new_chat_area{};
+    lv_obj_get_content_coords(required_object(root, "picoclaw_header"), &header_area);
+    assert_horizontal_settings_layout(row, header_area);
     lv_obj_get_coords(row, &row_area);
-    lv_obj_get_coords(required_object(root, "picoclaw_status_card"), &status_area);
-    lv_obj_get_coords(required_object(root, "picoclaw_history"), &history_area);
-    assert(status_area.y2 < row_area.y1 && row_area.y2 < history_area.y1);
+    lv_obj_get_coords(title, &title_area);
+    lv_obj_get_coords(dropdown, &model_area);
+    lv_obj_get_coords(history, &history_area);
+    lv_obj_get_coords(connection, &connection_area);
+    lv_obj_get_coords(new_chat, &new_chat_area);
+    assert(title_area.x2 < row_area.x1);
+    assert(model_area.y1 >= row_area.y1 && model_area.y2 <= row_area.y2);
+    assert(history_area.y1 >= row_area.y1 && history_area.y2 <= row_area.y2);
+    assert(connection_area.y1 >= row_area.y1 && connection_area.y2 <= row_area.y2);
+    assert(new_chat_area.y1 >= row_area.y1 && new_chat_area.y2 <= row_area.y2);
+    assert(connection_area.x2 < model_area.x1 && model_area.x2 < history_area.x1 &&
+           history_area.x2 < new_chat_area.x1);
+    assert(!std::string(lv_label_get_text(title)).empty());
+    assert(lv_obj_get_height(title) <= lv_font_get_line_height(lv_obj_get_style_text_font(title, LV_PART_MAIN)) + 2);
+    lv_area_t transcript_area{}, header_bounds{};
+    lv_obj_get_coords(required_object(root, "picoclaw_conversation"), &transcript_area);
+    lv_obj_get_coords(required_object(root, "picoclaw_header"), &header_bounds);
+    assert(transcript_area.y1 > header_bounds.y2 && transcript_area.y1 <= header_bounds.y2 + 20);
     assert(lv_obj_get_style_text_font(dropdown, LV_PART_MAIN));
+}
+
+void assert_chat_focus_borders(lv_obj_t *root, lv_display_t *display)
+{
+    for (const char *name : {"picoclaw_chat_model_dropdown", "picoclaw_history", "picoclaw_message_input",
+                             "picoclaw_send_button"}) {
+        auto *object = required_object(root, name);
+        for (const auto state : {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED}) {
+            lv_obj_add_state(object, state);
+            lv_obj_update_layout(root);
+            assert(lv_obj_get_style_outline_width(object, LV_PART_MAIN) == 0);
+            assert(lv_obj_get_style_outline_opa(object, LV_PART_MAIN) == LV_OPA_TRANSP);
+            assert(lv_obj_get_style_outline_pad(object, LV_PART_MAIN) == 0);
+            lv_refr_now(display);
+            assert_focus_border_visible(object);
+            lv_obj_remove_state(object, state);
+        }
+        lv_obj_add_state(object, LV_STATE_EDITED);
+        lv_obj_update_layout(root);
+        assert(lv_obj_get_style_outline_width(object, LV_PART_MAIN) == 0);
+        assert(lv_obj_get_style_outline_opa(object, LV_PART_MAIN) == LV_OPA_TRANSP);
+        assert(lv_obj_get_style_outline_pad(object, LV_PART_MAIN) == 0);
+        lv_obj_remove_state(object, LV_STATE_EDITED);
+    }
 }
 
 void choose_chat_model(lv_obj_t *root, const char *model_title)
@@ -654,8 +808,26 @@ void exercise_models_page(lv_obj_t *root, lv_display_t *display, lv_obj_t *surfa
             auto *group = required_object(root, ("picoclaw_provider_group_" + suffix).c_str());
             auto *heading = required_object(group, ("picoclaw_provider_title_" + suffix).c_str());
             auto *add = required_object(group, ("picoclaw_provider_add_" + suffix).c_str());
+            auto *configurations = required_object(group, ("picoclaw_provider_configs_" + suffix).c_str());
             assert(std::string(lv_label_get_text(heading)) == providers[provider].title);
+            assert(lv_obj_get_parent(add) == configurations);
             assert(lv_obj_get_width(add) >= 44 && lv_obj_get_height(add) >= 44);
+            lv_obj_t *reference_card = nullptr;
+            for (std::uint32_t child = 0; child < lv_obj_get_child_count(configurations); ++child) {
+                auto *candidate = lv_obj_get_child(configurations, child);
+                const char *name = lv_obj_get_name(candidate);
+                if (name && std::string(name).rfind("picoclaw_model_card_", 0) == 0) {
+                    reference_card = candidate;
+                    break;
+                }
+            }
+            if (reference_card) {
+                assert(lv_obj_get_width(add) == lv_obj_get_width(reference_card));
+                assert(lv_obj_get_height(add) == lv_obj_get_height(reference_card));
+            } else {
+                // Empty provider groups retain a card-sized add tile.
+                assert(lv_obj_get_height(add) == 144);
+            }
             lv_area_t area{};
             lv_obj_get_coords(group, &area);
             if (provider > 0) assert(area.y1 > previous.y2);
@@ -726,7 +898,19 @@ void exercise_models_page(lv_obj_t *root, lv_display_t *display, lv_obj_t *surfa
     lv_obj_scroll_to_view_recursive(imported_title, LV_ANIM_OFF);
     lv_obj_update_layout(root);
     assert_on_screen(imported_title, width, height);
-    tap_pointer(pointer, imported_title);
+    // Model cards clip their swipe contents; the focus frame must still be
+    // visible on all four sides before Enter opens the editor.
+    for (const auto state : {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED}) {
+        lv_obj_add_state(imported_front, state);
+        lv_obj_update_layout(root);
+        lv_obj_scroll_to_view_recursive(imported_front, LV_ANIM_OFF);
+        lv_refr_now(display);
+        assert_focus_border_visible(imported_front);
+        if (state == LV_STATE_FOCUS_KEY)
+            capture_page(display, snapshot_path, "-model-focus", width, height);
+        lv_obj_remove_state(imported_front, state);
+    }
+    press_hardware_enter(imported_front);
     lv_obj_update_layout(root);
     auto *imported_field = required_object(root, "picoclaw_model_editor_key");
     assert(std::string(lv_textarea_get_text(imported_field)) == imported_key);
@@ -1668,7 +1852,7 @@ int main(int argc, char **argv)
     assert(!lv_obj_find_by_name(context.root, "picoclaw_dashboard_tab"));
     assert(!lv_obj_find_by_name(context.root, "picoclaw_logs_tab"));
     assert(lv_obj_has_flag(required_object(context.root, "picoclaw_header_back"), LV_OBJ_FLAG_HIDDEN));
-    assert(std::string(lv_label_get_text(title)) == "AI CHAT");
+    assert(std::string(lv_label_get_text(title)) == (width < 480 ? "CHAT" : "AI CHAT"));
     assert(lv_obj_get_style_text_font(title, LV_PART_MAIN) != nullptr);
     assert(lv_color_eq(lv_obj_get_style_bg_color(surface, LV_PART_MAIN), lv_color_hex(kColorPageBackground)));
     assert(lv_color_eq(lv_obj_get_style_bg_color(header, LV_PART_MAIN), lv_color_hex(kColorContainerBackground)));
@@ -1701,20 +1885,19 @@ int main(int argc, char **argv)
     assert(chat_tab_initial);
     lv_obj_send_event(chat_tab_initial, LV_EVENT_CLICKED, nullptr);
     lv_obj_update_layout(context.root);
-    auto *status         = lv_obj_find_by_name(context.root, "picoclaw_status_card");
     auto *conversation   = lv_obj_find_by_name(context.root, "picoclaw_conversation");
     auto *input          = lv_obj_find_by_name(context.root, "picoclaw_message_input");
     auto *send           = lv_obj_find_by_name(context.root, "picoclaw_send_button");
     auto *new_chat       = lv_obj_find_by_name(context.root, "picoclaw_new_chat");
     auto *connection     = lv_obj_find_by_name(context.root, "picoclaw_connection_badge");
     auto *connection_dot = lv_obj_find_by_name(context.root, "picoclaw_connection_dot");
-    assert(status && conversation && input && send && new_chat && connection && connection_dot);
-    assert(std::string(lv_label_get_text(title)) == "AI CHAT");
-    assert(lv_color_eq(lv_obj_get_style_bg_color(status, LV_PART_MAIN), lv_color_hex(kColorPageBackground)));
+    assert(conversation && input && send && new_chat && connection && connection_dot);
+    assert(std::string(lv_label_get_text(title)) == (width < 480 ? "CHAT" : "AI CHAT"));
     assert(lv_obj_get_width(conversation) > 200);
     assert(lv_obj_get_height(conversation) > 100);
-    assert(lv_obj_get_width(connection) == 82);
+    assert(lv_obj_get_width(connection) == (width < 480 ? 14 : 82));
     assert_chat_model_layout(context.root, width, height);
+    assert_chat_focus_borders(context.root, display);
 
     exercise_models_page(context.root, display, surface, pointer, width, height, argv[3], api_calls);
     exercise_channels_page(context.root, display, surface, pointer, width, height, argv[3], channel_failure,
@@ -1775,6 +1958,25 @@ int main(int argc, char **argv)
     lv_obj_get_content_coords(settings_scroll, &settings_viewport);
     assert_horizontal_settings_layout(settings_grid, settings_viewport);
     assert_on_screen(save_settings, width, height);
+
+    // Verify Settings focus feedback is complete at both ends of its clipped
+    // scroll viewport, rather than only checking the control's geometry.
+    auto *gateway_start = required_object(context.root, "picoclaw_gateway_start");
+    lv_obj_add_state(gateway_start, LV_STATE_FOCUS_KEY);
+    lv_refr_now(display);
+    assert_focus_border_visible(gateway_start);
+    lv_obj_remove_state(gateway_start, LV_STATE_FOCUS_KEY);
+
+    auto *install_settings = required_object(context.root, "picoclaw_install");
+    lv_obj_scroll_to_view_recursive(install_settings, LV_ANIM_OFF);
+    lv_obj_update_layout(context.root);
+    assert_on_screen(install_settings, width, height);
+    lv_obj_add_state(install_settings, LV_STATE_FOCUSED);
+    lv_refr_now(display);
+    assert_focus_border_visible(install_settings);
+    lv_obj_remove_state(install_settings, LV_STATE_FOCUSED);
+    lv_obj_scroll_to_y(settings_scroll, 0, LV_ANIM_OFF);
+    lv_obj_update_layout(context.root);
 
     // Theme controls were removed in the single-palette redesign. Check the
     // whole settings subtree so hidden legacy objects do not survive.
@@ -1936,6 +2138,7 @@ int main(int argc, char **argv)
     assert(!lv_obj_find_by_name(context.root, "picoclaw_empty_state"));
     lv_dropdown_open(history);
     lv_obj_update_layout(context.root);
+    assert_on_screen(lv_dropdown_get_list(history), width, height);
     lv_tick_inc(20);
     lv_refr_now(display);
     std::string history_path = argv[3];
@@ -1968,17 +2171,32 @@ int main(int argc, char **argv)
         lv_obj_send_event(input, LV_EVENT_FOCUSED, nullptr);
         lv_obj_update_layout(context.root);
         assert(!lv_obj_has_flag(keyboard, LV_OBJ_FLAG_HIDDEN));
-        lv_area_t viewport{}, latest{}, composer_area{}, keyboard_area{};
+        lv_area_t viewport{}, latest{}, composer_area{}, keyboard_area{}, navigation_area{};
         lv_obj_get_content_coords(conversation, &viewport);
         lv_obj_get_coords(lv_obj_get_child(conversation, -1), &latest);
         lv_obj_get_coords(composer, &composer_area);
         lv_obj_get_coords(keyboard, &keyboard_area);
+        lv_obj_get_coords(bottom_nav, &navigation_area);
+        auto *history = required_object(context.root, "picoclaw_history");
+        auto *chat_model = required_object(context.root, "picoclaw_chat_model_dropdown");
+        auto *new_chat = required_object(context.root, "picoclaw_new_chat");
+        assert(!lv_obj_has_flag(bottom_nav, LV_OBJ_FLAG_HIDDEN));
+        if (height < 700) {
+            assert(lv_obj_has_flag(history, LV_OBJ_FLAG_HIDDEN));
+            assert(!lv_obj_has_flag(chat_model, LV_OBJ_FLAG_HIDDEN));
+            assert(!lv_obj_has_flag(new_chat, LV_OBJ_FLAG_HIDDEN));
+            assert_on_screen(chat_model, width, height);
+            assert_on_screen(new_chat, width, height);
+        }
+        assert_on_screen(bottom_nav, width, height);
         assert(lv_obj_get_height(conversation) < height_without_keyboard);
         assert(lv_obj_get_height(conversation) >= 64);
         assert(latest.y2 <= viewport.y2 && latest.y2 >= viewport.y1);
         assert(viewport.y2 < composer_area.y1);
         assert(composer_area.y2 < keyboard_area.y1);
         assert(keyboard_area.y2 < height);
+        if (lv_obj_get_width(bottom_nav) > lv_obj_get_height(bottom_nav))
+            assert(keyboard_area.y2 < navigation_area.y1);
         lv_tick_inc(20);
         lv_refr_now(display);
         std::string keyboard_path = argv[3];
@@ -1988,6 +2206,7 @@ int main(int argc, char **argv)
         lv_obj_send_event(keyboard, LV_EVENT_CANCEL, nullptr);
         lv_obj_update_layout(context.root);
         assert(lv_obj_has_flag(keyboard, LV_OBJ_FLAG_HIDDEN));
+        assert(!lv_obj_has_flag(history, LV_OBJ_FLAG_HIDDEN));
         assert(lv_obj_get_height(conversation) == height_without_keyboard);
         lv_obj_scroll_to_y(conversation, lv_obj_get_scroll_y(conversation) + lv_obj_get_scroll_bottom(conversation),
                            LV_ANIM_OFF);

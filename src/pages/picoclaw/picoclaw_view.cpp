@@ -55,6 +55,29 @@ lv_obj_t *make_label(lv_obj_t *parent, const char *text, std::uint32_t size, std
     return label;
 }
 
+std::string dropdown_caption(lv_obj_t *dropdown, std::string text)
+{
+    const auto *font = lv_obj_get_style_text_font(dropdown, LV_PART_MAIN);
+    if (!font) return text;
+    const auto measure = [dropdown, font](const std::string &value) {
+        lv_point_t size{};
+        lv_text_get_size(&size, value.c_str(), font, lv_obj_get_style_text_letter_space(dropdown, LV_PART_MAIN),
+                         0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        return size.x;
+    };
+    const auto available = lv_obj_get_content_width(dropdown) - measure(LV_SYMBOL_DOWN) -
+                           lv_obj_get_style_pad_column(dropdown, LV_PART_MAIN);
+    if (measure(text) <= available) return text;
+    // LVGL expands dropdown captions past their text area. Fit the caption
+    // explicitly so long model/conversation names cannot cover the arrow.
+    while (!text.empty() && measure(text + "…") > available) {
+        auto last = text.size() - 1;
+        while (last > 0 && (static_cast<unsigned char>(text[last]) & 0xC0) == 0x80) --last;
+        text.resize(last);
+    }
+    return measure("…") <= available ? text + "…" : std::string{};
+}
+
 lv_obj_t *make_button(lv_obj_t *parent, const char *name, const char *text, std::uint32_t background,
                       std::uint32_t foreground, lv_event_cb_t callback, void *user_data)
 {
@@ -67,6 +90,7 @@ lv_obj_t *make_button(lv_obj_t *parent, const char *name, const char *text, std:
     lv_obj_set_style_radius(button, 12, 0);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
+    components::set_focus_outline(button);
     if (callback) lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
     auto *label = make_label(button, text, 22, foreground);
     lv_obj_center(label);
@@ -170,6 +194,7 @@ lv_obj_t *make_field(lv_obj_t *parent, const char *name, const char *label_text,
     lv_obj_set_style_border_width(input, 0, 0);
     lv_obj_set_style_shadow_width(input, 0, 0);
     lv_obj_set_style_outline_width(input, 0, 0);
+    components::set_focus_outline(input);
     lv_obj_set_style_radius(input, 6, 0);
     lv_obj_set_style_pad_hor(input, 0, 0);
     lv_obj_set_style_pad_ver(input, 12, 0);
@@ -192,6 +217,7 @@ lv_obj_t *make_settings_dropdown(lv_obj_t *parent, const char *name, const char 
     lv_obj_set_style_text_align(dropdown, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_bg_color(dropdown, lv_color_hex(components::color_container_background), 0);
     lv_obj_set_style_border_width(dropdown, 0, 0);
+    components::set_focus_outline(dropdown);
     lv_obj_set_style_radius(dropdown, 6, 0);
     lv_obj_set_style_pad_hor(dropdown, 0, 0);
     lv_obj_set_style_pad_ver(dropdown, 12, 0);
@@ -370,6 +396,7 @@ lv_obj_t *PicoClawView::create(lv_obj_t *parent, const char *application_name)
 void PicoClawView::destroy() noexcept
 {
     view_model_.cancel_weixin_binding();
+    host_text_input_.focus(nullptr);
     lv_async_call_cancel(rebuild_screen_async, this);
     lv_async_call_cancel(layout_weixin_async, this);
     lv_async_call_cancel(rebuild_models_async, this);
@@ -652,6 +679,63 @@ void PicoClawView::model_save_clicked(lv_event_t *event)
         lv_obj_clear_flag(view->models_feedback_label_, LV_OBJ_FLAG_HIDDEN);
         view->sync_state(true);
     }
+}
+
+void PicoClawView::model_front_key(lv_event_t *event)
+{
+    auto *view = static_cast<PicoClawView *>(lv_event_get_user_data(event));
+    if (!view || view->view_model_.busy()) return;
+    auto *input = lv_indev_active();
+    if (!input) return;
+    const auto key = lv_indev_get_key(input);
+    if (key != LV_KEY_DEL && key != LV_KEY_BACKSPACE) return;
+
+    auto *front = lv_event_get_target_obj(event);
+    auto *row = front ? lv_obj_get_parent(front) : nullptr;
+    const auto index = front ? reinterpret_cast<std::uintptr_t>(lv_obj_get_user_data(front)) - 1U : 0U;
+    if (!row || index >= view->view_model_.profiles().size()) return;
+
+    // A keyboard has no swipe gesture. Open the same action row used by touch,
+    // show the confirmation state immediately, and move focus to the action so
+    // Enter completes the deletion without requiring a pointer.
+    view->settle_model_swipe(row, true);
+    auto *button = lv_obj_get_child(row, 1);
+    if (!button) return;
+    view->models_swipe_confirm_ = true;
+    lv_label_set_text(lv_obj_get_child(button, 0), "Confirm");
+    if (auto *group = lv_obj_get_group(front)) {
+        if (lv_obj_get_group(button) != group) lv_group_add_obj(group, button);
+        lv_group_focus_obj(button);
+    }
+    lv_obj_scroll_to_view_recursive(button, LV_ANIM_OFF);
+}
+
+void PicoClawView::model_delete_key(lv_event_t *event)
+{
+    auto *view = static_cast<PicoClawView *>(lv_event_get_user_data(event));
+    if (!view) return;
+    auto *input = lv_indev_active();
+    if (!input) return;
+    const auto key = lv_indev_get_key(input);
+    auto *button = lv_event_get_target_obj(event);
+    auto *row = button ? lv_obj_get_parent(button) : nullptr;
+    if (!row || view->models_swipe_row_ != row) return;
+    if (key == LV_KEY_LEFT || key == LV_KEY_RIGHT) {
+        view->settle_model_swipe(row, false);
+        auto *front = lv_obj_get_child(row, 0);
+        if (front) {
+            if (auto *group = lv_obj_get_group(button)) {
+                if (lv_obj_get_group(front) != group) lv_group_add_obj(group, front);
+                lv_group_focus_obj(front);
+            }
+        }
+        lv_event_stop_processing(event);
+        return;
+    }
+    if (key != LV_KEY_DEL && key != LV_KEY_BACKSPACE) return;
+    // Keep Delete/Backspace equivalent to pressing the focused Delete button.
+    // This also preserves the touch path's two-step confirmation behavior.
+    view->model_swipe_delete_clicked(event);
 }
 
 void PicoClawView::settle_model_swipe(lv_obj_t *row, bool open)
@@ -1008,6 +1092,9 @@ void PicoClawView::timer_tick(lv_timer_t *timer)
 void PicoClawView::build_screen()
 {
     if (!content_) return;
+    // The page subtree is about to be replaced. Detach host shortcuts before
+    // deleting the textarea that currently owns them.
+    host_text_input_.focus(nullptr);
     lv_async_call_cancel(rebuild_screen_async, this);
     lv_async_call_cancel(layout_weixin_async, this);
     lv_async_call_cancel(rebuild_models_async, this);
@@ -1019,6 +1106,9 @@ void PicoClawView::build_screen()
     if (save_button_) lv_obj_delete(save_button_);
     if (models_import_button_) lv_obj_delete(models_import_button_);
     if (channels_refresh_) lv_obj_delete(channels_refresh_);
+    // The chat toolbar lives in the persistent header rather than the page
+    // content, so remove it explicitly when navigating away from Chat.
+    if (chat_model_row_) lv_obj_delete(chat_model_row_);
     save_button_ = nullptr;
     models_import_button_ = nullptr;
     channels_refresh_ = nullptr;
@@ -1165,6 +1255,7 @@ void PicoClawView::build_channel_editor()
     lv_obj_set_width(label, 0);
     lv_obj_set_flex_grow(label, 1);
     channel_enabled_ = lv_switch_create(row);
+    components::set_focus_outline(channel_enabled_);
     lv_obj_set_name_static(channel_enabled_, "picoclaw_channel_enabled");
     lv_obj_set_size(channel_enabled_, 51, 31);
     lv_obj_set_style_bg_color(channel_enabled_, lv_color_hex(components::color_control_background), LV_PART_MAIN);
@@ -1214,6 +1305,7 @@ void PicoClawView::build_channel_editor()
                 lv_obj_set_width(field_name, 0);
                 lv_obj_set_flex_grow(field_name, 1);
                 input = lv_switch_create(field_row);
+                components::set_focus_outline(input);
                 lv_obj_set_size(input, 51, 31);
                 lv_obj_set_style_bg_color(input, lv_color_hex(components::color_control_background), LV_PART_MAIN);
                 lv_obj_set_style_bg_color(input, lv_color_hex(components::color_success), LV_PART_INDICATOR | LV_STATE_CHECKED);
@@ -1495,11 +1587,9 @@ void PicoClawView::build_models()
         lv_obj_set_style_bg_opa(configurations, LV_OPA_TRANSP, 0);
         lv_obj_set_style_radius(configurations, 16, 0);
         lv_obj_set_flex_flow(configurations, LV_FLEX_FLOW_ROW_WRAP);
-        std::size_t count = 0;
         for (std::size_t index = 0; index < profiles.size(); ++index) {
             const auto &profile = profiles[index];
             if (model_provider_index(profile) != provider_index) continue;
-            ++count;
             auto *card = lv_obj_create(configurations);
             make_plain(card);
             lv_obj_set_name(card, ("picoclaw_model_card_" + std::to_string(index)).c_str());
@@ -1519,20 +1609,28 @@ void PicoClawView::build_models()
             lv_obj_add_event_cb(card, model_swipe_event, LV_EVENT_SCROLL_BEGIN, this);
             lv_obj_add_event_cb(card, model_swipe_event, LV_EVENT_SCROLL_END, this);
 
-            auto *front = lv_obj_create(card);
+            // A button participates in LVGL's keypad focus group, so a
+            // hardware Enter can activate the same edit action as a tap.
+            auto *front = lv_button_create(card);
             make_plain(front);
+            // Reserve the focus border so focusing cannot resize the swipe
+            // contents or move the delete action during a drag.
+            lv_obj_set_style_border_width(front, 2, 0);
+            lv_obj_set_style_border_opa(front, LV_OPA_TRANSP, 0);
+            components::set_focus_outline(front);
             lv_obj_set_name(front, ("picoclaw_model_front_" + std::to_string(index)).c_str());
             lv_obj_set_size(front, LV_PCT(100), LV_SIZE_CONTENT);
             lv_obj_clear_flag(front, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(front, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_user_data(front, reinterpret_cast<void *>(index + 1U));
             lv_obj_add_event_cb(front, model_edit_clicked, LV_EVENT_CLICKED, this);
+            lv_obj_add_event_cb(front, model_front_key, LV_EVENT_KEY, this);
             lv_obj_set_style_min_height(front, 88, 0);
             lv_obj_set_style_bg_color(front, lv_color_hex(components::color_container_background), 0);
             lv_obj_set_style_bg_color(front, lv_color_hex(components::color_accent_soft), LV_STATE_PRESSED);
             lv_obj_set_style_bg_opa(front, LV_OPA_COVER, 0);
             lv_obj_set_style_radius(front, 16, 0);
-            lv_obj_set_style_pad_all(front, 12, 0);
+            lv_obj_set_style_pad_all(front, 10, 0);
             lv_obj_set_style_pad_column(front, 8, 0);
             lv_obj_set_flex_flow(front, LV_FLEX_FLOW_ROW);
             lv_obj_set_flex_align(front, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1600,13 +1698,17 @@ void PicoClawView::build_models()
             lv_obj_set_style_radius(remove, 16, 0);
             lv_obj_set_user_data(remove, reinterpret_cast<void *>(index + 1U));
             (void)components::set_text_font(lv_obj_get_child(remove, 0), 17);
+            lv_obj_add_event_cb(remove, model_delete_key, LV_EVENT_KEY, this);
             set_disabled(remove, true);
         }
-        if (count == 0) lv_obj_add_flag(configurations, LV_OBJ_FLAG_HIDDEN);
-        auto *add = make_button(group, "picoclaw_provider_add", LV_SYMBOL_PLUS,
+        auto *add = make_button(configurations, "picoclaw_provider_add", LV_SYMBOL_PLUS,
                                 components::color_accent_soft, components::color_action, model_add_clicked, this);
         lv_obj_set_name(add, ("picoclaw_provider_add_" + std::to_string(provider_index)).c_str());
-        lv_obj_set_size(add, LV_PCT(100), 44);
+        // The add action is a tile in the same responsive grid as model cards.
+        // Use a card-sized default for empty provider groups; apply_layout copies
+        // the rendered card height when one is available.
+        lv_obj_set_size(add, LV_PCT(100), 144);
+        lv_obj_set_style_radius(add, 16, 0);
         lv_obj_set_user_data(add, reinterpret_cast<void *>(provider_index + 1U));
     }
     update_provider_statuses();
@@ -1659,6 +1761,7 @@ void PicoClawView::build_model_editor()
     lv_obj_set_width(model_editor_id_, 0);
     lv_obj_set_flex_grow(model_editor_id_, 1);
     model_editor_dropdown_ = lv_dropdown_create(model_controls);
+    components::set_focus_outline(model_editor_dropdown_);
     lv_obj_set_name_static(model_editor_dropdown_, "picoclaw_model_editor_dropdown");
     lv_obj_set_size(model_editor_dropdown_, 44, 44);
     lv_dropdown_set_text(model_editor_dropdown_, "");
@@ -1729,83 +1832,25 @@ void PicoClawView::build_chat()
     lv_obj_set_style_pad_all(chat_shell_, 18, 0);
     lv_obj_set_style_pad_row(chat_shell_, 12, 0);
     lv_obj_set_flex_flow(chat_shell_, LV_FLEX_FLOW_COLUMN);
+    chat_feedback_ = make_label(chat_shell_, "", 14, components::color_danger);
+    lv_obj_set_name_static(chat_feedback_, "picoclaw_chat_feedback");
+    lv_obj_set_width(chat_feedback_, LV_PCT(100));
+    lv_obj_add_flag(chat_feedback_, LV_OBJ_FLAG_HIDDEN);
 
-    status_card_ = make_card(chat_shell_, "picoclaw_status_card");
-    lv_obj_set_width(status_card_, LV_PCT(100));
-    lv_obj_set_height(status_card_, 92);
-    // Keep the compact status strip on the grouped iOS background; full cards
-    // below remain white surfaces with rounded corners.
-    lv_obj_set_style_bg_color(status_card_, lv_color_hex(components::color_page_background), 0);
-    lv_obj_set_style_border_width(status_card_, 0, 0);
-    lv_obj_set_style_pad_all(status_card_, 16, 0);
-    lv_obj_set_style_pad_row(status_card_, 4, 0);
-
-    // Android's chat screen keeps the conversation action close to the
-    // context/status header.  A compact icon button preserves that affordance
-    // on both portrait and landscape layouts.
-    auto *status_header = lv_obj_create(status_card_);
-    make_plain(status_header);
-    lv_obj_set_width(status_header, LV_PCT(100));
-    lv_obj_set_height(status_header, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(status_header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    status_label_ = make_label(status_header, "Ready", 14, components::color_muted_text);
-    lv_obj_set_name_static(status_label_, "picoclaw_status");
-    lv_obj_set_width(status_label_, 0);
-    lv_obj_set_flex_grow(status_label_, 1);
-    lv_label_set_long_mode(status_label_, LV_LABEL_LONG_DOT);
-    lv_label_bind_text(status_label_, view_model_.status_subject(), "%s");
-    connection_badge_ = lv_obj_create(status_header);
-    make_plain(connection_badge_);
-    lv_obj_set_name_static(connection_badge_, "picoclaw_connection_badge");
-    lv_obj_set_size(connection_badge_, 82, 28);
-    lv_obj_set_style_bg_color(connection_badge_, lv_color_hex(components::color_accent_soft), 0);
-    lv_obj_set_style_bg_opa(connection_badge_, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(connection_badge_, 14, 0);
-    lv_obj_set_style_pad_column(connection_badge_, 4, 0);
-    lv_obj_set_flex_flow(connection_badge_, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(connection_badge_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    auto *connection_dot = lv_obj_create(connection_badge_);
-    make_plain(connection_dot);
-    lv_obj_set_name_static(connection_dot, "picoclaw_connection_dot");
-    lv_obj_set_size(connection_dot, 6, 6);
-    lv_obj_set_style_bg_color(connection_dot, lv_color_hex(components::color_warning), 0);
-    lv_obj_set_style_radius(connection_dot, 3, 0);
-    auto *connection_text = make_label(connection_badge_, "Offline", 12, components::color_warning);
-    lv_obj_set_name_static(connection_text, "picoclaw_connection_text");
-    lv_obj_center(connection_text);
-    profile_label_ = make_label(status_card_, "", 14, components::color_text);
-    lv_obj_set_name_static(profile_label_, "picoclaw_profile");
-    lv_obj_set_width(profile_label_, LV_PCT(100));
-    lv_label_bind_text(profile_label_, view_model_.profile_subject(), "Model: %s");
-    runtime_summary_label_ = make_label(status_card_, "", 14, components::color_muted_text);
-    lv_obj_set_name_static(runtime_summary_label_, "picoclaw_runtime_summary");
-    lv_obj_set_width(runtime_summary_label_, LV_PCT(100));
-    lv_label_set_long_mode(runtime_summary_label_, LV_LABEL_LONG_DOT);
-    lv_obj_add_flag(profile_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(runtime_summary_label_, LV_OBJ_FLAG_HIDDEN);
-
-    new_chat_button_ = components::create_icon_button(status_header, LV_SYMBOL_PLUS, "picoclaw_new_chat",
-                                                      components::color_accent, new_chat_clicked, this);
-    lv_obj_set_size(new_chat_button_, 42, 42);
-    lv_obj_set_style_radius(new_chat_button_, 21, 0);
-
-    chat_model_row_ = lv_obj_create(chat_shell_);
+    // Chat controls share the title bar so the transcript gets the full body.
+    chat_model_row_ = lv_obj_create(header_);
     make_plain(chat_model_row_);
     lv_obj_set_name_static(chat_model_row_, "picoclaw_chat_model_row");
-    lv_obj_set_size(chat_model_row_, LV_PCT(100), 44);
+    lv_obj_set_size(chat_model_row_, LV_SIZE_CONTENT, 44);
     lv_obj_clear_flag(chat_model_row_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_column(chat_model_row_, 8, 0);
+    lv_obj_set_style_pad_column(chat_model_row_, 4, 0);
     lv_obj_set_flex_flow(chat_model_row_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(chat_model_row_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    auto *model_caption = make_label(chat_model_row_, "Model", 14, components::color_muted_text);
-    lv_obj_set_width(model_caption, 48);
     chat_model_dropdown_ = lv_dropdown_create(chat_model_row_);
+    components::set_focus_outline(chat_model_dropdown_);
     lv_obj_set_name_static(chat_model_dropdown_, "picoclaw_chat_model_dropdown");
     lv_obj_set_size(chat_model_dropdown_, 0, 44);
-    lv_obj_set_flex_grow(chat_model_dropdown_, 1);
-    (void)components::set_text_font(chat_model_dropdown_, 16);
+    (void)components::set_text_font(chat_model_dropdown_, 14);
     lv_obj_set_style_text_color(chat_model_dropdown_, lv_color_hex(components::color_action), 0);
     lv_obj_set_style_bg_color(chat_model_dropdown_, lv_color_hex(components::color_container_background), 0);
     lv_obj_set_style_border_color(chat_model_dropdown_, lv_color_hex(components::color_border), 0);
@@ -1821,18 +1866,11 @@ void PicoClawView::build_chat()
     lv_obj_set_style_text_color(model_list, lv_color_hex(components::color_action), LV_PART_SELECTED);
     lv_obj_set_style_text_line_space(model_list, 24, LV_PART_MAIN);
 
-    auto *history_row = lv_obj_create(chat_shell_);
-    make_plain(history_row);
-    lv_obj_set_size(history_row, LV_PCT(100), 40);
-    lv_obj_set_style_pad_column(history_row, 8, 0);
-    lv_obj_set_flex_flow(history_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(history_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    make_label(history_row, "History", 14, components::color_muted_text);
-    conversation_dropdown_ = lv_dropdown_create(history_row);
+    conversation_dropdown_ = lv_dropdown_create(chat_model_row_);
+    components::set_focus_outline(conversation_dropdown_);
     lv_obj_set_name_static(conversation_dropdown_, "picoclaw_history");
     lv_obj_set_width(conversation_dropdown_, 0);
-    lv_obj_set_height(conversation_dropdown_, 40);
-    lv_obj_set_flex_grow(conversation_dropdown_, 1);
+    lv_obj_set_height(conversation_dropdown_, 44);
     (void)components::set_text_font(conversation_dropdown_, 14);
     lv_obj_set_style_text_color(conversation_dropdown_, lv_color_hex(components::color_text), 0);
     lv_obj_set_style_bg_color(conversation_dropdown_, lv_color_hex(components::color_container_background), 0);
@@ -1842,6 +1880,35 @@ void PicoClawView::build_chat()
     (void)components::set_text_font(history_list, 16);
     lv_obj_set_style_text_color(history_list, lv_color_hex(components::color_text), 0);
     lv_obj_set_style_bg_color(history_list, lv_color_hex(components::color_container_background), 0);
+
+    connection_badge_ = lv_obj_create(chat_model_row_);
+    make_plain(connection_badge_);
+    lv_obj_set_name_static(connection_badge_, "picoclaw_connection_badge");
+    lv_obj_set_size(connection_badge_, 82, 28);
+    lv_obj_set_style_bg_color(connection_badge_, lv_color_hex(components::color_accent_soft), 0);
+    lv_obj_set_style_bg_opa(connection_badge_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(connection_badge_, 14, 0);
+    lv_obj_set_style_pad_column(connection_badge_, 4, 0);
+    lv_obj_set_flex_flow(connection_badge_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(connection_badge_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    auto *connection_dot = lv_obj_create(connection_badge_);
+    make_plain(connection_dot);
+    lv_obj_set_name_static(connection_dot, "picoclaw_connection_dot");
+    lv_obj_set_size(connection_dot, 6, 6);
+    lv_obj_set_style_bg_color(connection_dot, lv_color_hex(components::color_warning), 0);
+    lv_obj_set_style_bg_opa(connection_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(connection_dot, 3, 0);
+    auto *connection_text = make_label(connection_badge_, "Offline", 12, components::color_warning);
+    lv_obj_set_name_static(connection_text, "picoclaw_connection_text");
+    lv_obj_center(connection_text);
+    // Keep the runtime indicator next to the title before the selectors. This
+    // gives the header a stable visual order: status, model, history, new chat.
+    lv_obj_move_to_index(connection_badge_, 0);
+
+    new_chat_button_ = components::create_icon_button(chat_model_row_, LV_SYMBOL_PLUS, "picoclaw_new_chat",
+                                                      components::color_accent, new_chat_clicked, this);
+    lv_obj_set_size(new_chat_button_, 42, 42);
+    lv_obj_set_style_radius(new_chat_button_, 21, 0);
 
     conversation_ = components::create_card(chat_shell_);
     lv_obj_set_name_static(conversation_, "picoclaw_conversation");
@@ -1868,6 +1935,7 @@ void PicoClawView::build_chat()
     lv_obj_set_flex_align(composer_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     message_input_ = lv_textarea_create(composer_);
+    components::set_focus_outline(message_input_);
     lv_obj_set_name_static(message_input_, "picoclaw_message_input");
     lv_obj_set_height(message_input_, 58);
     lv_obj_set_width(message_input_, 0);
@@ -2053,11 +2121,8 @@ void PicoClawView::clear_screen_pointers() noexcept
     channels_rendered_ids_.clear();
     channel_show_secrets_ = false;
     chat_shell_                 = nullptr;
-    status_card_                = nullptr;
-    status_label_               = nullptr;
+    chat_feedback_              = nullptr;
     connection_badge_           = nullptr;
-    profile_label_              = nullptr;
-    runtime_summary_label_      = nullptr;
     conversation_               = nullptr;
     composer_                   = nullptr;
     message_input_              = nullptr;
@@ -2291,6 +2356,7 @@ void PicoClawView::show_keyboard(lv_obj_t *textarea, bool chat_input)
     if (!keyboard_ || !textarea) return;
     keyboard_is_chat_ = chat_input;
     lv_keyboard_set_textarea(keyboard_, textarea);
+    host_text_input_.focus(textarea);
     lv_obj_clear_flag(keyboard_, LV_OBJ_FLAG_HIDDEN);
     apply_layout();
     if (!chat_input) {
@@ -2302,6 +2368,7 @@ void PicoClawView::show_keyboard(lv_obj_t *textarea, bool chat_input)
 void PicoClawView::hide_keyboard()
 {
     if (!keyboard_) return;
+    host_text_input_.focus(nullptr);
     lv_keyboard_set_textarea(keyboard_, nullptr);
     lv_obj_add_flag(keyboard_, LV_OBJ_FLAG_HIDDEN);
     keyboard_is_chat_ = false;
@@ -2336,6 +2403,29 @@ void PicoClawView::update_provider_statuses()
     }
 }
 
+void PicoClawView::update_chat_dropdown_text()
+{
+    const bool narrow = lv_obj_get_content_width(main_column_) < 480;
+    if (chat_model_dropdown_) {
+        const auto selected = view_model_.chat_profile_index();
+        chat_model_display_text_ = narrow ? "Model"
+                                         : selected < view_model_.profiles().size()
+                                               ? "Model · " + view_model_.chat_profile().title
+                                               : "Select a model";
+        chat_model_display_text_ = dropdown_caption(chat_model_dropdown_, chat_model_display_text_);
+        lv_dropdown_set_text(chat_model_dropdown_, chat_model_display_text_.c_str());
+    }
+    if (conversation_dropdown_) {
+        const auto selected = view_model_.active_conversation_index();
+        const auto &conversations = view_model_.conversations();
+        const auto text = !narrow && selected < conversations.size()
+                              ? "History · " + conversations[selected].title
+                              : std::string("History");
+        const auto caption = dropdown_caption(conversation_dropdown_, text);
+        lv_dropdown_set_text(conversation_dropdown_, caption.c_str());
+    }
+}
+
 void PicoClawView::sync_state(bool force)
 {
     if (!surface_) return;
@@ -2348,12 +2438,15 @@ void PicoClawView::sync_state(bool force)
     }
 
     sync_channels();
-
-    char summary[192]{};
-    std::snprintf(summary, sizeof(summary), "%s  |  Network %s  |  Gateway %s",
-                  runtime.installed ? runtime.version.c_str() : "Runtime missing",
-                  runtime.network_ready ? "ready" : "offline", runtime.gateway_running ? "running" : "stopped");
-    if (runtime_summary_label_) lv_label_set_text(runtime_summary_label_, summary);
+    if (chat_feedback_) {
+        const bool blocked = !busy && !view_model_.chat_model_ready();
+        if (blocked) {
+            lv_label_set_text(chat_feedback_, lv_subject_get_string(view_model_.status_subject()));
+            lv_obj_clear_flag(chat_feedback_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(chat_feedback_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     if (connection_badge_) {
         auto *connection_text = lv_obj_find_by_name(connection_badge_, "picoclaw_connection_text");
@@ -2441,11 +2534,6 @@ void PicoClawView::sync_state(bool force)
             lv_dropdown_set_options(chat_model_dropdown_, options.c_str());
         const auto selected = view_model_.chat_profile_index();
         lv_dropdown_set_selected(chat_model_dropdown_, selected < view_model_.profiles().size() ? selected : 0);
-        // Keep the compact selector readable; the expanded list includes the
-        // provider as context for similarly named configurations.
-        chat_model_display_text_ = selected < view_model_.profiles().size() ? view_model_.chat_profile().title
-                                                                           : "Select a model";
-        lv_dropdown_set_text(chat_model_dropdown_, chat_model_display_text_.c_str());
         set_disabled(chat_model_dropdown_, busy);
     }
     if (models_list_ && !models_editing_) {
@@ -2468,8 +2556,10 @@ void PicoClawView::sync_state(bool force)
         }
         if (options != lv_dropdown_get_options(conversation_dropdown_))
             lv_dropdown_set_options(conversation_dropdown_, options.c_str());
-        lv_dropdown_set_selected(conversation_dropdown_, view_model_.active_conversation_index());
+        const auto selected = view_model_.active_conversation_index();
+        lv_dropdown_set_selected(conversation_dropdown_, selected);
     }
+    update_chat_dropdown_text();
     set_disabled(save_button_, busy || (weixin_binding_ && view_model_.weixin_binding().active()));
     set_disabled(install_button_, busy || (runtime.update_supported && (!selected_release || !selected_release->installable)));
     set_disabled(check_updates_button_, busy || !runtime.update_supported);
@@ -2496,11 +2586,13 @@ void PicoClawView::update_navigation()
     if (title_) {
         const char *provider_name = model_editor_provider_ ? lv_textarea_get_text(model_editor_provider_) : "";
         const char *editor_title = *provider_name ? provider_name : model_providers[models_provider_index_].name;
-        lv_label_set_text(title_, chat ? "AI CHAT" :
+        lv_label_set_text(title_, chat ? (lv_obj_get_content_width(main_column_) < 480 ? "CHAT" : "AI CHAT") :
                          models ? (models_editing_ ? editor_title : "Models") :
                          channels ? (view_model_.channel_draft() ? view_model_.channel_draft()->title.c_str() : "Channels") :
                          logs ? "LOGS" : "Settings");
-        lv_label_set_long_mode(title_, (models && models_editing_) || channels ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
+        lv_label_set_long_mode(title_, chat ? LV_LABEL_LONG_CLIP
+                                           : (models && models_editing_) || channels ? LV_LABEL_LONG_DOT
+                                                                                     : LV_LABEL_LONG_WRAP);
         lv_obj_set_style_text_color(title_, lv_color_hex(components::color_container_title), 0);
     }
     if (header_back_) {
@@ -2551,61 +2643,81 @@ void PicoClawView::apply_layout() noexcept
     const bool channels           = view_model_.screen() == PicoClawScreen::Channels;
     if (conversation_dropdown_) {
         // On short displays reserve the remaining height for the transcript
-        // while typing, with the model selector still available.
-        auto *history_row = lv_obj_get_parent(conversation_dropdown_);
-        if (typing_chat && height < 700) lv_obj_add_flag(history_row, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_clear_flag(history_row, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (bottom_navigation_) {
-        if (typing)
-            lv_obj_add_flag(bottom_navigation_, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_clear_flag(bottom_navigation_, LV_OBJ_FLAG_HIDDEN);
+        // while keeping the model selector and new-chat action available.
+        if (typing_chat && height < 700) lv_obj_add_flag(conversation_dropdown_, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_clear_flag(conversation_dropdown_, LV_OBJ_FLAG_HIDDEN);
     }
     compact_layout_ = compact;
     lv_obj_set_flex_flow(surface_, wide ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
     lv_obj_set_size(main_column_, wide ? 0 : LV_PCT(100), wide ? LV_PCT(100) : 0);
     lv_obj_set_flex_grow(main_column_, 1);
 
-    lv_obj_set_height(header_, settings && !typing ? 80 : 64);
+    const bool chat = view_model_.screen() == PicoClawScreen::Chat;
+    const std::int32_t main_width = width - (wide ? navigation_rail_width : 0);
+    const bool narrow_chat = main_width < 480;
+    if (chat && title_) lv_label_set_text(title_, narrow_chat ? "CHAT" : "AI CHAT");
+    lv_obj_set_height(header_, settings && !typing ? 80 : chat ? 60 : 64);
     lv_obj_set_style_bg_color(
         header_, lv_color_hex(settings ? components::color_page_background : components::color_container_background),
         0);
     lv_obj_set_style_border_width(header_, settings ? 0 : 1, 0);
     lv_obj_set_style_border_side(header_, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_pad_hor(header_, settings ? 20 : 16, 0);
-    lv_obj_set_style_pad_column(header_, models || channels ? 8 : 16, 0);
+    lv_obj_set_style_pad_hor(header_, settings ? 20 : chat ? 8 : 16, 0);
+    lv_obj_set_style_pad_column(header_, chat || models || channels ? 8 : 16, 0);
     lv_obj_set_style_pad_ver(header_, 8, 0);
     lv_obj_set_flex_flow(header_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     if (title_) {
         lv_obj_set_width(title_, 0);
         lv_obj_set_flex_grow(title_, 1);
-        (void)components::set_text_font(title_, settings && !typing ? 36 : 24);
-        lv_obj_set_height(title_, (models && models_editing_) || channels
+        (void)components::set_text_font(title_, settings && !typing ? 36 : chat && narrow_chat ? 22 : 24);
+        lv_obj_set_height(title_, chat || (models && models_editing_) || channels
                                      ? lv_font_get_line_height(lv_obj_get_style_text_font(title_, LV_PART_MAIN))
                                      : LV_SIZE_CONTENT);
     }
 
-    const std::int32_t main_width  = width - (wide && !typing ? navigation_rail_width : 0);
     const std::int32_t available   = std::max<std::int32_t>(260, main_width - (compact ? 20 : 64));
     const std::int32_t shell_width = std::min<std::int32_t>(available, 1040);
-    if (chat_model_dropdown_) {
-        auto *list = lv_dropdown_get_list(chat_model_dropdown_);
-        lv_obj_set_style_max_width(list, std::max<std::int32_t>(1, shell_width - (compact ? 20 : 36) - 56), 0);
-        lv_obj_set_style_max_height(list, std::min<std::int32_t>(300, height / 2), 0);
-    }
     if (chat_shell_) {
         lv_obj_set_width(chat_shell_, shell_width);
         lv_obj_set_style_pad_all(chat_shell_, compact ? 10 : 18, 0);
         lv_obj_set_style_pad_row(chat_shell_, compact ? 8 : 12, 0);
+        lv_obj_update_layout(chat_shell_);
     }
-    if (status_card_) {
-        // The status card now includes a toolbar row for the new-conversation
-        // action, so reserve room for the profile and runtime summaries too.
-        lv_obj_set_height(status_card_, 48);
-        lv_obj_set_style_pad_all(status_card_, 0, 0);
+    if (chat_model_row_) {
+        const auto model_width = narrow_chat ? 72 : std::clamp<std::int32_t>(main_width / 4, 92, compact ? 140 : 220);
+        const auto history_width = narrow_chat ? 72 : std::clamp<std::int32_t>(main_width / 4, 92, compact ? 150 : 240);
+        lv_obj_set_width(chat_model_row_, LV_SIZE_CONTENT);
+        if (chat_model_dropdown_) lv_obj_set_width(chat_model_dropdown_, model_width);
+        if (conversation_dropdown_) lv_obj_set_width(conversation_dropdown_, history_width);
+        for (auto *dropdown : {chat_model_dropdown_, conversation_dropdown_})
+            if (dropdown) lv_obj_set_style_pad_hor(dropdown, narrow_chat ? 6 : 12, 0);
+        if (connection_badge_) {
+            lv_obj_set_size(connection_badge_, narrow_chat ? 14 : 82, narrow_chat ? 14 : 28);
+            auto *label = lv_obj_find_by_name(connection_badge_, "picoclaw_connection_text");
+            if (label) {
+                if (narrow_chat) lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+                else lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (new_chat_button_) lv_obj_set_size(new_chat_button_, 42, 42);
+        lv_obj_update_layout(header_);
+        update_chat_dropdown_text();
     }
+    const auto constrain_chat_dropdown = [width, height, compact](lv_obj_t *dropdown) {
+        if (!dropdown) return;
+        auto *list = lv_dropdown_get_list(dropdown);
+        lv_area_t dropdown_area{};
+        lv_obj_get_coords(dropdown, &dropdown_area);
+        // A popup opens at its selector's horizontal position, so cap its
+        // width to the remaining screen space on that side.
+        const auto right_margin = compact ? 10 : 18;
+        const auto popup_width = std::max<std::int32_t>(1, width - dropdown_area.x1 - right_margin);
+        lv_obj_set_style_max_width(list, popup_width, 0);
+        lv_obj_set_style_max_height(list, std::min<std::int32_t>(300, height / 2), 0);
+    };
+    constrain_chat_dropdown(chat_model_dropdown_);
+    constrain_chat_dropdown(conversation_dropdown_);
     if (keyboard_) lv_obj_set_height(keyboard_, height < 700 ? 190 : 250);
     if (settings_shell_) lv_obj_set_width(settings_shell_, settings ? LV_PCT(100) : shell_width);
     if (models_shell_) lv_obj_set_width(models_shell_, LV_PCT(100));
@@ -2627,6 +2739,29 @@ void PicoClawView::apply_layout() noexcept
         for (std::size_t i = 0; i < models_rendered_count_; ++i) {
             const auto name = "picoclaw_model_card_" + std::to_string(i);
             if (auto *card = lv_obj_find_by_name(models_list_, name.c_str())) lv_obj_set_width(card, card_width);
+        }
+        for (std::size_t provider = 0; provider < model_provider_count; ++provider) {
+            const auto name = "picoclaw_provider_add_" + std::to_string(provider);
+            if (auto *add = lv_obj_find_by_name(models_list_, name.c_str())) lv_obj_set_width(add, card_width);
+        }
+        // Resolve card content heights after applying the responsive widths,
+        // then give each add tile the same height as a card in its group.
+        lv_obj_update_layout(models_list_);
+        for (std::size_t provider = 0; provider < model_provider_count; ++provider) {
+            const auto add_name = "picoclaw_provider_add_" + std::to_string(provider);
+            auto *add = lv_obj_find_by_name(models_list_, add_name.c_str());
+            if (!add) continue;
+            lv_coord_t tile_height = 144;
+            for (std::size_t i = 0; i < view_model_.profiles().size(); ++i) {
+                if (model_provider_index(view_model_.profiles()[i]) != provider) continue;
+                const auto card_name = "picoclaw_model_card_" + std::to_string(i);
+                if (auto *card = lv_obj_find_by_name(models_list_, card_name.c_str())) {
+                    const auto card_height = lv_obj_get_height(card);
+                    if (card_height > 0) tile_height = card_height;
+                }
+                break;
+            }
+            lv_obj_set_height(add, tile_height);
         }
     }
     if (settings_scroll_) lv_obj_set_style_pad_all(settings_scroll_, compact ? 16 : 32, 0);

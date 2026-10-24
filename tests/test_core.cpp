@@ -613,6 +613,23 @@ void test_model_conversation_and_status()
     assert(model.runtime().model_key_ready);
 }
 
+void test_websocket_status_uses_configured_gateway_host()
+{
+    TestEnvironment environment;
+    environment.set("PICOCLAW_TRANSPORT", "websocket");
+    PicoClawModel model;
+    auto settings = model.settings();
+    settings.host = "192.168.8.197";
+    std::string error;
+    assert(model.update_settings(settings, error));
+
+    // The helper may report its local discovery placeholder while the SDL
+    // simulator connects to a remote WebSocket gateway. The UI endpoint must
+    // follow the configured host in that transport mode.
+    model.apply_runtime_status("installed=yes\ngateway=running\nurl=http://device:18790\n");
+    assert(model.runtime().url == "http://192.168.8.197:18790");
+}
+
 void test_model_settings_use_runtime_config_directory()
 {
     TestEnvironment environment;
@@ -1108,6 +1125,7 @@ int main()
     test_registry_v1_migration_and_import_infer_only_provider_metadata();
     test_model_registry_import_is_atomic_and_preserves_existing_models();
     test_model_conversation_and_status();
+    test_websocket_status_uses_configured_gateway_host();
     test_async_client();
     test_client_preserves_completed_results_until_polled();
     test_history_persistence();

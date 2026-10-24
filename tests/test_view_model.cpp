@@ -250,6 +250,7 @@ void test_chat_model_switch_uses_selected_alias_and_preserves_conversation()
     assert(!model.chat_model_ready() && model.busy());
     assert(wait_for_poll(model));
     assert(model.chat_model_ready() && model.chat_profile_index() == 7);
+    assert(std::string(lv_subject_get_string(model.status_subject())) == "Ready to chat");
     assert(model.protocol_session_id() == session && model.messages().size() == transcript_size);
     assert(model.send("Continue with second model"));
     assert(wait_for_poll(model));

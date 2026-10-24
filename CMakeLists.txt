@@ -3,14 +3,14 @@ cmake_minimum_required(VERSION 3.21)
 include(cmake/LpmMetadata.cmake)
 project(${LILYGO_UI_CMAKE_PROJECT_NAME} LANGUAGES C CXX)
 
+# The LVGL target is created by LilyGoUI during find_package(). Define this
+# before importing AppKit so LVGL's optional QR-code sources are compiled too.
+add_compile_definitions(LV_USE_QRCODE=1)
+
 include(GNUInstallDirs)
 include(CTest)
 find_package(LilyGoUI CONFIG REQUIRED)
 find_package(Threads REQUIRED)
-
-# Weixin account binding displays a scannable QR code. Enable LVGL's bundled
-# encoder so the native target can render the binding payload.
-add_compile_definitions(LV_USE_QRCODE=1)
 
 configure_file(
     cmake/app_identity.h.in
@@ -36,6 +36,7 @@ target_link_libraries(lilygo_ui_picoclaw_core PUBLIC Threads::Threads)
 add_library(lilygo_ui_picoclaw_ui STATIC
     src/app.cpp
     src/components/components.cpp
+    src/components/host_text_input.cpp
     src/pages/picoclaw/picoclaw_view.cpp
     src/pages/picoclaw/picoclaw_view_model.cpp)
 target_include_directories(lilygo_ui_picoclaw_ui PUBLIC

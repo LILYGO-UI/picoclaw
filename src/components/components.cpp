@@ -2,6 +2,8 @@
 
 #include <cm0/typography.h>
 
+#include <initializer_list>
+
 namespace components {
 
 namespace {
@@ -139,6 +141,27 @@ bool set_text_font(lv_obj_t *object, std::uint32_t size, lv_style_selector_t sel
     return true;
 }
 
+void set_focus_outline(lv_obj_t *object) noexcept
+{
+    if (!object) return;
+    constexpr std::int32_t focus_width = 2;
+    // The default theme adds outer outlines for keyboard focus and edited
+    // text controls. They can be clipped by Chat's header/composer or a
+    // Settings scroll viewport, so clear all of them first.
+    for (const lv_style_selector_t selector : {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED, LV_STATE_EDITED}) {
+        lv_obj_set_style_outline_width(object, 0, selector);
+        lv_obj_set_style_outline_opa(object, LV_OPA_TRANSP, selector);
+        lv_obj_set_style_outline_pad(object, 0, selector);
+    }
+    // A focused border is rendered inside the control's coordinates so all
+    // four edges remain visible.
+    for (const lv_style_selector_t selector : {LV_STATE_FOCUS_KEY, LV_STATE_FOCUSED}) {
+        lv_obj_set_style_border_width(object, focus_width, selector);
+        lv_obj_set_style_border_color(object, lv_color_hex(color_accent), selector);
+        lv_obj_set_style_border_opa(object, LV_OPA_COVER, selector);
+    }
+}
+
 lv_obj_t *create_page(lv_obj_t *parent)
 {
     auto *page = lv_obj_create(parent);
@@ -204,8 +227,7 @@ lv_obj_t *create_button(lv_obj_t *parent, const char *text, lv_event_cb_t callba
     lv_obj_set_style_bg_color(button, lv_color_hex(0x006FE6), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(button, LV_OPA_50, LV_STATE_DISABLED);
     lv_obj_set_style_shadow_width(button, 0, 0);
-    lv_obj_set_style_outline_width(button, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(button, lv_color_hex(color_accent_soft), LV_STATE_FOCUSED);
+    set_focus_outline(button);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
 
     auto *label = lv_label_create(button);
@@ -228,8 +250,7 @@ lv_obj_t *create_icon_button(lv_obj_t *parent, const char *symbol, const char *a
     lv_obj_set_style_bg_color(button, lv_color_hex(0x006FE6), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(button, LV_OPA_50, LV_STATE_DISABLED);
     lv_obj_set_style_shadow_width(button, 0, 0);
-    lv_obj_set_style_outline_width(button, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(button, lv_color_hex(color_accent_soft), LV_STATE_FOCUSED);
+    set_focus_outline(button);
     if (callback) lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
 
     auto *label = lv_label_create(button);
@@ -258,9 +279,7 @@ lv_obj_t *create_navigation_item(lv_obj_t *parent, NavigationIcon icon, const ch
     lv_obj_set_style_bg_color(item, lv_color_hex(color_accent_soft), LV_STATE_CHECKED | LV_STATE_PRESSED);
     lv_obj_set_style_text_color(item, lv_color_hex(color_muted_text), 0);
     lv_obj_set_style_text_color(item, lv_color_hex(color_accent), LV_STATE_CHECKED);
-    lv_obj_set_style_outline_width(item, 2, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_color(item, lv_color_hex(color_accent_soft), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_opa(item, LV_OPA_COVER, LV_STATE_FOCUS_KEY);
+    set_focus_outline(item);
     (void)set_text_font(item, 12);
     lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(item, LV_FLEX_FLOW_COLUMN);
