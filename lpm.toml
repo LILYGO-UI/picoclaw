@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 package = "lilygo-ui-picoclaw"
-version = "0.1.0"
+version = "0.1.1"
 app_id = "cc.lilygo.ui.PicoClaw"
 title = "PicoClaw"
 summary = "Private AI assistant for LILYGO UI"
